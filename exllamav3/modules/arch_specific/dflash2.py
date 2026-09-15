@@ -327,4 +327,7 @@ class CandidateSelector(Module):
 
     @override
     def forward(self, x: torch.Tensor, params: dict, out_dtype: torch.dtype = torch.half) -> torch.Tensor:
-        raise NotImplementedError("CandidateSelector runs via select(), not forward()")
+        # The selector sits in the model's module list so the loader reaches its weights, and
+        # the module walk visits every entry in order — here it must leave the state untouched.
+        # Selection happens via select(), called from propose() with the draft block states.
+        return x
