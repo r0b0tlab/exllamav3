@@ -61,7 +61,7 @@ def test_propose_shapes_with_stub_target_head():
 
     # zero the codebooks and projection so edge scores vanish: the greedy walk must
     # then pick the head-logit argmax candidate at every position
-    with torch.no_grad():
+    with torch.inference_mode():
         sel = model.candidate_selector
         sel.predecessor_codebook.zero_()
         sel.successor_codebook.zero_()
@@ -90,7 +90,7 @@ def test_propose_shapes_with_stub_target_head():
             return x
 
         def forward(self, x, params):
-            return torch.nn.functional.linear(x, self.w.float())
+            return torch.nn.functional.linear(x.float(), self.w.float())
 
     model.attached_model = lambda: _StubTarget(248320, 5120)
 

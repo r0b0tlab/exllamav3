@@ -248,18 +248,29 @@ class CandidateSelector(Module):
     @override
     def load(self, device: torch.device, **kwargs):
         super().load(device, **kwargs)
-        self.predecessor_codebook = self.config.stc.get_tensor(
-            f"{self.key}.predecessor_codebook.weight",
+        # The DFlash2 checkpoints store the codebooks under the bare embedding name
+        # (candidate_selector.predecessor_codebook); some trainers append .weight like a
+        # standard nn.Embedding. Accept both.
+        self.predecessor_codebook = self._load_codebook("predecessor_codebook", device)
+        self.successor_codebook = self._load_codebook("successor_codebook", device)
+
+
+    def _load_codebook(self, name: str, device: torch.device) -> torch.Tensor:
+        t = self.config.stc.get_tensor(
+            f"{self.key}.{name}",
             device,
             float2half = True,
+            optional = True,
             no_defer = True,
         )
-        self.successor_codebook = self.config.stc.get_tensor(
-            f"{self.key}.successor_codebook.weight",
-            device,
-            float2half = True,
-            no_defer = True,
-        )
+        if t is None:
+            t = self.config.stc.get_tensor(
+                f"{self.key}.{name}.weight",
+                device,
+                float2half = True,
+                no_defer = True,
+            )
+        return t
 
 
     @override
