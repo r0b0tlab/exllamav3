@@ -193,15 +193,18 @@ class GroupedDynamicCausalConv(Module):
         proj = self.kernel_projection.forward(hidden, params, out_dtype = torch.float)
         groups = hidden.shape[-1] // self.group_size
         dynamic = proj.view(*hidden.shape[:-1], 2, self.kernel_size, groups)
+        # The projection runs in fp32 (dynamic deltas are small); the sublayer consuming
+        # this output is fp16 (EXL3 GEMMs require kHalf), so cast the conv result back
+        # on the way out.
         return (
-            grouped_dynamic_convolve(hidden, dynamic[..., 0, :, :], self.base_kernel[0], self.group_size),
+            grouped_dynamic_convolve(hidden, dynamic[..., 0, :, :], self.base_kernel[0], self.group_size).to(hidden.dtype),
             dynamic[..., 1, :, :],
         )
 
 
     def finish(self, hidden: torch.Tensor, dynamic: torch.Tensor, params: dict) -> torch.Tensor:
         assert self.base_kernel is not None, "GroupedDynamicCausalConv not loaded"
-        return grouped_dynamic_convolve(hidden, dynamic, self.base_kernel[1], self.group_size)
+        return grouped_dynamic_convolve(hidden, dynamic, self.base_kernel[1], self.group_size).to(hidden.dtype)
 
 
     @override
