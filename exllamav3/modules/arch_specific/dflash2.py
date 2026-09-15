@@ -93,7 +93,9 @@ def selector_select(
     # the codebooks load as fp16; keep the bilinear term in one dtype (no-op for the
     # fp32 parity tests, cast for the loaded model)
     hidden = hidden.to(predecessor_codebook.dtype)
-    predecessor = anchor_ids
+    # anchor ids arrive from the generator's job bookkeeping (CPU); the codebooks live on
+    # the model device, so the index tensor has to follow
+    predecessor = anchor_ids.to(predecessor_codebook.device)
     path, q_rows = [], []
     for position in range(hidden.shape[1]):
         scores = unary[:, position] + torch.einsum(

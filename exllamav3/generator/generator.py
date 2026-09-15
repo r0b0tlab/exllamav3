@@ -967,8 +967,12 @@ class Generator:
                 return None
             window = min(window, conf_len)
 
-        # Crop out the first token after sampling to keep batch contiguous for lm_head
-        new_ids = new_ids[:, 1:]
+        # v1 drafters sample the full block; the first (anchor-position) sample is redundant, so
+        # crop it to start the window at the first drafted token. DFlash2's propose() returns
+        # positions 1..block_size-1 directly — cropping again would drop a draft token and shift
+        # the selector's per-position candidates/q out of alignment with the verify loop.
+        if not self.dflash2_draft:
+            new_ids = new_ids[:, 1:]
 
         # Confidence-calibrated truncation: cut the batch window at the first position whose
         # drafter confidence falls below the calibrated threshold, taking the longest cut across
