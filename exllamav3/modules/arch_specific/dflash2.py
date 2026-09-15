@@ -90,6 +90,9 @@ def selector_select(
     unary, candidates = torch.topk(logits, top_k, dim = -1, sorted = False)
     if hidden_projection_weight is not None:
         hidden = F.linear(hidden, hidden_projection_weight)
+    # the codebooks load as fp16; keep the bilinear term in one dtype (no-op for the
+    # fp32 parity tests, cast for the loaded model)
+    hidden = hidden.to(predecessor_codebook.dtype)
     predecessor = anchor_ids
     path, q_rows = [], []
     for position in range(hidden.shape[1]):
@@ -304,7 +307,7 @@ class CandidateSelector(Module):
         anchor_ids: torch.Tensor,
         temperature: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        proj = self.hidden_projection.forward(hidden, {}, out_dtype = torch.float)
+        proj = self.hidden_projection.forward(hidden, {}, out_dtype = torch.half)
         assert self.predecessor_codebook is not None and self.successor_codebook is not None, \
             "CandidateSelector not loaded"
         return selector_select(
