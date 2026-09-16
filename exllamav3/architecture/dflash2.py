@@ -234,7 +234,7 @@ class DFlash2Model(DFlashModel):
         """
         assert not self.loaded_tp, "DFlash2 drafting is not supported with tensor parallelism"
         target = self.attached_model()
-        hidden = out_state[:, 1:, :]
+        hidden = out_state[:, 1:, :].contiguous()  # EXL3 lm_head requires contiguous input
         ll = target.logit_layer_idx
         lm = target.modules[ll]
         logits = lm.prepare_for_device(hidden, params)
