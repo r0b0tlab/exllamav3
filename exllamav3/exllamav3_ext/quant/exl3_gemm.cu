@@ -50,6 +50,20 @@ uint64_t roundup_pow2(uint64_t x)
     return x + 1;
 }
 
+// Shape selection is m-dependent above m = 16: the dense multi-row shapes require size_m >= 32 and
+// >= 64. The tune key must therefore separate those ranges, or a shape tuned at m = 16 gets reused
+// for every larger m. Bucketed rather than keyed on raw m to keep the on-disk cache bounded.
+// Values for m <= 16 are unchanged from the original MIN(roundup_pow2(size_m), 16), so pre-existing
+// cache entries for the small-m regime stay valid.
+static int gemm_autotune_m_key(int size_m)
+{
+    if (size_m <= 16) return MIN(roundup_pow2(size_m), 16);
+    if (size_m <= 31) return 32;
+    if (size_m <= 63) return 64;
+    if (size_m <= 127) return 128;
+    return 512;
+}
+
 uint64_t gemm_autotune_hash
 (
     int size_m,
@@ -69,7 +83,7 @@ uint64_t gemm_autotune_hash
         h ^= v;
         h *= 1099511628211ull;
     };
-    mix((uint64_t) MIN(roundup_pow2(size_m), 16));
+    mix((uint64_t) gemm_autotune_m_key(size_m));
     mix((uint64_t) size_k);
     mix((uint64_t) size_n);
     mix((uint64_t) K);

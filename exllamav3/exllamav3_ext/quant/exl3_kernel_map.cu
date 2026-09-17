@@ -28,6 +28,17 @@ int select_gemm_shape(int cc, int size_m, int size_k, int size_n, int K, bool mu
     size_k *= bszm_in;
     size_n *= bszm_out;
 
+    // Dense multi-row shapes. When the row count fills a 32- or 64-row tile, prefer the shape that
+    // shares one decoded B fragment across all its row fragments instead of re-streaming the whole
+    // trellis per 16 rows. Measured 2.41x on the verify pass at m=64 on an RTX 3090 (FORK.md).
+    // `multi` is the fused-MoE launch, whose kernel loop is still 16 rows wide and whose instance
+    // slots for shapes 5/6 are null, so it must never be routed here.
+    if (!multi)
+    {
+        if (size_m >= 64 && (size_k % 32 == 0) && (size_n % 128 == 0)) return 6;
+        if (size_m >= 32 && (size_k % 32 == 0) && (size_n % 256 == 0)) return 5;
+    }
+
     switch(cc)
     {
         case CC_OLD:
@@ -79,14 +90,20 @@ int exl3_gemm_num_kernel_shapes()
     return EXL3_GEMM_NUM_SHAPES;
 }
 
+int exl3_gemm_tilesize_m[] = {EXL3_GEMM_TILESIZE_M};
 int exl3_gemm_tilesize_k[] = {EXL3_GEMM_TILESIZE_K};
 int exl3_gemm_tilesize_n[] = {EXL3_GEMM_TILESIZE_N};
 int exl3_gemm_blockdim[] = {EXL3_GEMM_BLOCKDIM};
 
 bool exl3_gemm_shape_compat(int shape_idx, int size_m, int size_k, int size_n, int K)
 {
+    int tilesize_m = exl3_gemm_tilesize_m[shape_idx];
     int tilesize_k = exl3_gemm_tilesize_k[shape_idx];
     int tilesize_n = exl3_gemm_tilesize_n[shape_idx];
+    // The dense multi-row shapes (TILESIZE_M > 16) may only be selected when the row count fills
+    // the tile. Shapes with TILESIZE_M == 16 keep their original always-compatible behaviour: the
+    // fused-MoE path calls this with per-expert token counts that can be below 16.
+    if (tilesize_m > 16 && size_m < tilesize_m) return false;
     return (size_k % tilesize_k == 0) && (size_n % tilesize_n == 0);
 }
 

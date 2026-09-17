@@ -32,8 +32,22 @@ change that touches `exllamav3/modules/` or the generator will conflict often.
 
 A measured set of EXL3 serving wins on consumer NVIDIA hardware, built in this order:
 
-1. **Dense M=32/64 tile that shares a decoded B fragment across row-tiles.** Measured at **2.41x**
-   on the verify pass at m=64. See below. This is the flagship change.
+1. **Dense M=32/64 tile that shares a decoded B fragment across row-tiles. SHIPPED, measured
+   1.35x-1.92x on the verify pass.** On an RTX 3090 with `qwen38-27b-exl3` at 4.000 bpw,
+   default (autotuned) path:
+   | m | up_proj (5120x17408) | down_proj (17408x5120) |
+   | --- | --- | --- |
+   | 1 / 8 / 16 | unchanged | unchanged |
+   | 32 | 0.120 ms vs 0.162 (1.35x) | 0.121 vs 0.191 (1.58x) |
+   | 64 | 0.215 vs 0.319 (1.48x) | 0.202 vs 0.383 (1.87x) |
+   | 128 | 0.416 vs 0.619 (1.49x) | 0.410 vs 0.783 (1.92x) |
+   | 192 | 0.621 vs 0.927 (1.50x) | 0.609 vs 1.160 (1.92x) |
+
+   Numerics: `TILEBLOCKS_M` contributes **zero** divergence. Shapes 5 and 6 reproduce the
+   existing shapes' divergence statistics bit-for-bit against shape 4 — 5-vs-4 matches 3-vs-4
+   exactly, 6-vs-4 matches 2-vs-4 exactly — so all of the observed spread is the pre-existing
+   (k,n) tiling difference, already present between upstream's own shapes 2, 3 and 4. Relative RMS
+   stays at 2.0e-3 .. 3.8e-3 for every pair. Do not "fix" this by tightening tolerances.
 2. Per-architecture fixes the upstream tree hardcodes: `SMEM_MAX` is pinned to 90 KB with the
    comment "max shared memory on compute capability 8.6" and is passed straight to
    `cudaFuncSetAttribute` and the cooperative autotuner; the fp16-accumulator MMA gate
