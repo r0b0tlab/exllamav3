@@ -13,7 +13,16 @@ from ..util import Timer, human_time
 from ..util.tensor import save_tensor_image
 from ..util.measures import cosine_error, sqnr
 from .calibration_data import get_default_calibration, get_file_calibration
-from .remote_quant_client import parse_remotes, rpc
+try:
+    from .remote_quant_client import parse_remotes, rpc
+except ImportError:
+    # Single-node tree: remote trellis files intentionally absent.
+    # parse_remotes() == [] keeps every call site on the local path.
+    def parse_remotes(env=None):
+        return []
+
+    def rpc(*a, **k):
+        raise RuntimeError("remote quant support not present (single-node tree)")
 from .compile import compile_model, dsize
 from .allocation import create_q_strategy, create_q_strategy_from_recipe, print_strategy
 from ..loader.safetensors_alt import save_file, safe_open
