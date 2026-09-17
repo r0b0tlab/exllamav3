@@ -278,13 +278,21 @@ class DFlash2Selector(Module):
         # for its tensors. Proposal generation invokes walk() after the shared target LM head.
         return to2(x, out_dtype, None)
 
+    def _load_codebook(self, key: str) -> torch.Tensor:
+        # Native convert writes the bare embedding name; some EXL3 drafts keep nn.Embedding's
+        # `.weight` suffix. Accept both so published HF drafts load without a re-export.
+        t = self.config.stc.get_tensor(
+            key, self.device, optional = True, allow_bf16 = True)
+        if t is None:
+            t = self.config.stc.get_tensor(
+                f"{key}.weight", self.device, optional = False, allow_bf16 = True)
+        return t
+
     @override
     def load(self, device: torch.device, **kwargs):
         super().load(device, **kwargs)
-        self.pred_codebook = self.config.stc.get_tensor(
-            self.key_pred, self.device, optional = False, allow_bf16 = True)
-        self.succ_codebook = self.config.stc.get_tensor(
-            self.key_succ, self.device, optional = False, allow_bf16 = True)
+        self.pred_codebook = self._load_codebook(self.key_pred)
+        self.succ_codebook = self._load_codebook(self.key_succ)
         expected_shape = (self.vocab_size, self.rank)
         if self.pred_codebook.shape != expected_shape:
             raise ValueError(
