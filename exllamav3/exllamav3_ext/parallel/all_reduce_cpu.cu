@@ -109,11 +109,15 @@ void run_cpu_reduce_jobs
                 break;
             if (++spins < 65536)
             {
+#if defined(__x86_64__) || defined(__i386__)
                 #ifdef __linux__
                     __builtin_ia32_pause();
                 #else
                     _mm_pause();
                 #endif
+#else
+                std::this_thread::yield();
+#endif
                 continue;
             }
             std::this_thread::sleep_for(std::chrono::microseconds(50));

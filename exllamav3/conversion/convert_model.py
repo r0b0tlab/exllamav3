@@ -13,6 +13,7 @@ from ..util import Timer, human_time
 from ..util.tensor import save_tensor_image
 from ..util.measures import cosine_error, sqnr
 from .calibration_data import get_default_calibration, get_file_calibration
+from .remote_quant_client import parse_remotes, rpc
 from .compile import compile_model, dsize
 from .allocation import create_q_strategy, create_q_strategy_from_recipe, print_strategy
 from ..loader.safetensors_alt import save_file, safe_open
@@ -395,6 +396,32 @@ def get_state_error(x, ref):
      return err.item(), cos, sq
 
 
+def quant_device_list(local_devices):
+    extra = parse_remotes()
+    if extra:
+        print(f" -- Remote quant workers: {extra}", flush = True)
+    return list(local_devices) + extra
+
+
+def install_exl3_from_tensors(linear, out_tensors, bias):
+    linear.inner = LinearEXL3(
+        linear.config,
+        linear.in_features,
+        linear.out_features,
+        out_tensors.get("scale"),
+        out_tensors.get("su"),
+        out_tensors.get("sv"),
+        out_tensors.get("suh"),
+        out_tensors.get("svh"),
+        out_tensors.get("trellis"),
+        out_tensors.get("mcg"),
+        out_tensors.get("mul1"),
+        bias,
+        linear.out_dtype,
+        key = linear.key,
+    )
+
+
 def make_quant_args(args, idx, K, devices, device_ratios = None):
     quant_args = {
         "seed": idx,
@@ -576,6 +603,13 @@ def quantize_linears_parallel(args, linears, config, strategy, idx, devices, dev
 
     for group in groups:
         g_numel = sum(linear.weights_numel() for linear in group)
+        # Shared-Hessian fused groups (same qmap) stay on local CUDA.
+        # Stacked loners (per-expert H, different qmaps) may go remote.
+        shared_h = len({l.qmap for l in group}) == 1 and len(group) > 1
+        if shared_h:
+            all_dev_groups[0].append(group)
+            dev_numel[0] -= g_numel
+            continue
         fit = [d_numel - g_numel for d_numel in dev_numel]
         bestfit = max(range(len(fit)), key = lambda x: fit[x])
         dev_numel[bestfit] -= g_numel
@@ -603,8 +637,30 @@ def quantize_linears_parallel(args, linears, config, strategy, idx, devices, dev
             t0 = time.time()
             work_numel = sum(l.weights_numel() for g in dev_groups for l in g)
 
+            remote = isinstance(device_idx, str)
             for group in dev_groups:
                 if len(group) > 1:
+                    if remote:
+                        weights, biases, hdatas, qas = [], [], [], []
+                        for l in group:
+                            weights.append(l.inner.get_weight_tensor())
+                            biases.append(l.inner.get_bias_tensor())
+                            l.inner = None
+                            hdatas.append(capture_H[l.qmap] if state else l.init_H_data(False))
+                            qas.append(make_quant_args(args, idx, strategy[l.key], [0]))
+                        resp = rpc(device_idx, {
+                            "op": "quantize_exl3_batch",
+                            "weights": weights,
+                            "H_datas": hdatas,
+                            "quant_args_list": qas,
+                        })
+                        for linear, bias, item in zip(group, biases, resp["results"]):
+                            install_exl3_from_tensors(linear, item["out_tensors"], bias)
+                            qas_i = item.get("quant_args") or qas[0]
+                            print_quantized_linear(config, linear, qas_i, item["proxy_err"])
+                            with progress_lock:
+                                curr_progress += 1
+                        continue
                     quant_args_list = [make_quant_args(args, idx, strategy[l.key], [device_idx]) for l in group]
                     proxy_errs = convert_exl3_group(
                         group,
@@ -620,6 +676,25 @@ def quantize_linears_parallel(args, linears, config, strategy, idx, devices, dev
                     continue
 
                 linear = group[0]
+                if remote:
+                    bias = linear.inner.get_bias_tensor()
+                    weight = linear.inner.get_weight_tensor()
+                    linear.inner = None
+                    qa = make_quant_args(args, idx, strategy[linear.key], [0])
+                    h = capture_H[linear.qmap] if state else linear.init_H_data(False)
+                    resp = rpc(device_idx, {
+                        "op": "quantize_exl3",
+                        "weight": weight,
+                        "H_data": h,
+                        "quant_args": qa,
+                    })
+                    install_exl3_from_tensors(linear, resp["out_tensors"], bias)
+                    qa = resp.get("quant_args") or qa
+                    print_quantized_linear(config, linear, qa, resp["proxy_err"])
+                    with progress_lock:
+                        curr_progress += 1
+                    continue
+
                 quant_args_local = make_quant_args(args, idx, strategy[linear.key], [device_idx])
 
                 proxy_err = linear.convert_exl3(
@@ -636,10 +711,9 @@ def quantize_linears_parallel(args, linears, config, strategy, idx, devices, dev
                 with progress_lock:
                     curr_progress += 1
 
-            # The device is idle from here until the slowest thread finishes; its measured speed
-            # steers the next module's split
-            torch.cuda.synchronize(torch.device(device_idx))
-            auto_split.report("quant_thread", device_idx, work_numel, time.time() - t0)
+            if not remote:
+                torch.cuda.synchronize(torch.device(device_idx))
+                auto_split.report("quant_thread", device_idx, work_numel, time.time() - t0)
 
     # Launch
     threads = []
@@ -1294,7 +1368,9 @@ def main(args, job_state):
                 len(linears) >= len(devices) and
                 all(strategy[l.key] <= 8 for l in linears)
             ):
-                quantize_linears_parallel(args, linears, config, strategy, idx, devices, eff_ratios("quant_thread"), capture_H, state)
+                qdevs = quant_device_list(devices)
+                qratios = None if len(qdevs) != len(devices) else eff_ratios("quant_thread")
+                quantize_linears_parallel(args, linears, config, strategy, idx, qdevs, qratios, capture_H, state)
             else:
                 quantize_linears_single(args, linears, config, strategy, idx, devices, eff_ratios("quant_tiles"), capture_H, state)
 
@@ -1469,7 +1545,9 @@ def main(args, job_state):
                 len(linears) >= len(devices) and
                 all(strategy[l.key] <= 8 for l in linears)
             ):
-                quantize_linears_parallel(args, linears, config, strategy, idx, devices, eff_ratios("quant_thread"), None, None)
+                qdevs = quant_device_list(devices)
+                qratios = None if len(qdevs) != len(devices) else eff_ratios("quant_thread")
+                quantize_linears_parallel(args, linears, config, strategy, idx, qdevs, qratios, None, None)
             else:
                 quantize_linears_single(args, linears, config, strategy, idx, devices, eff_ratios("quant_tiles"), None, None)
 

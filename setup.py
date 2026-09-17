@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import platform
 
 from setuptools import setup
 
@@ -62,6 +63,17 @@ sources = [
     for file in files
     if file.endswith(('.c', '.cpp', '.cu'))
 ]
+if platform.machine() in ("aarch64", "arm64"):
+    skip_sfx = (
+        "cpu/moe_mul1.cpp",
+        "cpu/moe_mul1_stub.cpp",
+        "parallel/all_reduce_cpu_avx2.cpp",
+        "parallel/all_reduce_cpu_avx512.cpp",
+        "parallel/all_reduce_cpu_stub.cpp",
+    )
+    sources = [s for s in sources if not s.endswith(skip_sfx)]
+    sources.append(os.path.join(library_dir, extension_name, "cpu/moe_mul1_stub.cpp"))
+    sources.append(os.path.join(library_dir, extension_name, "parallel/all_reduce_cpu_stub.cpp"))
 
 setup_kwargs = (
     {

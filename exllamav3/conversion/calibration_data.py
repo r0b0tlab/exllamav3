@@ -3,19 +3,36 @@ import os
 import random
 
 def split_art(articles, rows, columns, tokenizer):
+    articles = [a for a in articles if a and not a.isspace()]
+    if not articles:
+        raise ValueError("calibration split_art received no articles")
     t_rows = []
     idx = 0
     empty = torch.empty((1, 0), dtype = torch.long)
     t_row = empty
+    n = len(articles)
+    # Cycle the corpus when rows*cols exceeds unique article tokens (default
+    # 1024x2048 on a 5.5 MiB mix). Walking idx off the list was IndexError.
+    max_steps = rows * columns + 2 * n
+    steps = 0
     while len(t_rows) < rows:
+        if steps >= max_steps:
+            raise RuntimeError(
+                f"calibration split_art could not fill {rows}x{columns} from {n} articles"
+            )
         add_special_tokens = (len(t_rows) % 2 == 0)
-        t_art = tokenizer.encode(articles[idx], add_bos = add_special_tokens, add_eos = add_special_tokens)
+        t_art = tokenizer.encode(articles[idx % n], add_bos = add_special_tokens, add_eos = add_special_tokens)
+        if t_art.numel() == 0:
+            idx += 1
+            steps += 1
+            continue
         t_row = torch.cat((t_row, t_art), dim = -1)
         t_row = t_row[:, :columns]
         if t_row.shape[-1] == columns:
             t_rows.append(t_row)
             t_row = empty
         idx += 1
+        steps += 1
     return t_rows
 
 
@@ -32,7 +49,7 @@ def split_tiny(text, rows, columns, tokenizer):
 
 def shuffle_lines(text, rows, columns, tokenizer):
     articles = text.split("\n")
-    articles = [a for a in articles if not a.isspace()]
+    articles = [a for a in articles if a.strip()]
     random.seed(0)
     random.shuffle(articles)
     return split_art(articles, rows, columns, tokenizer)
@@ -40,6 +57,12 @@ def shuffle_lines(text, rows, columns, tokenizer):
 
 def split_raw(text, rows, columns, tokenizer):
     t_all = tokenizer.encode(text)
+    if t_all.numel() == 0:
+        raise ValueError("calibration split_raw encoded empty text")
+    need = rows * columns
+    if t_all.shape[-1] < need:
+        reps = (need + t_all.shape[-1] - 1) // t_all.shape[-1]
+        t_all = t_all.repeat(1, reps)
     t_rows = []
     for i in range(rows):
         a = i * columns
