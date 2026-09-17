@@ -1,0 +1,75 @@
+# r0b0tlab/exllamav3 — community fork
+
+An MIT-licensed community fork of [turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3),
+maintained for EXL3 **serving performance** work that is too invasive or too specific for upstream.
+Upstream remains the source of truth for correctness; this fork is the place where measured
+speedups get built and proven before anything is proposed upstream or folded into a standalone
+engine.
+
+## Branch layout
+
+| branch | role |
+| --- | --- |
+| `community` | **the fork.** Tracking branch for everything we maintain. |
+| `master` | clean mirror of upstream `master`. Never commit here; it is the sync point. |
+| `dflash2-pathway`, `dflash2-pathway-backup` | superseded. Upstream `dev` landed its own native DFlash2 (CUDA kernels in `exllamav3_ext/dflash2.cu`, `architecture/dflash2.py`, `tests/test_dflash2.py`). Our PR was declined on the grounds that upstream's implementation is better, which it is. Do not build on these. |
+
+`community` is based on upstream **`dev`**, not `master`, because upstream's live work (DFlash2,
+GDN rewind, MoE CPU offload) is on `dev`. Rebasing across a `dev` rewrite is expected and accepted;
+keep our changes in separate commits with clear messages so a rebase is mechanical.
+
+### Syncing with upstream
+
+```
+git fetch origin
+git rebase origin/dev        # on `community`
+```
+
+Keep our diffs additive and confined to `exllamav3/exllamav3_ext/quant/` where possible. Any
+change that touches `exllamav3/modules/` or the generator will conflict often.
+
+## What this fork is for
+
+A measured set of EXL3 serving wins on consumer NVIDIA hardware, built in this order:
+
+1. **Dense M=32/64 tile that shares a decoded B fragment across row-tiles.** Measured at **2.41x**
+   on the verify pass at m=64. See below. This is the flagship change.
+2. Per-architecture fixes the upstream tree hardcodes: `SMEM_MAX` is pinned to 90 KB with the
+   comment "max shared memory on compute capability 8.6" and is passed straight to
+   `cudaFuncSetAttribute` and the cooperative autotuner; the fp16-accumulator MMA gate
+   (`EXL3_GEMM_H_ACC`) is `__CUDA_ARCH__ == 860` even though upstream's own measurements record
+   2.00x on 3090, 4090 **and 5090**.
+3. Whatever the measurements say next. No change lands without a number attached.
+
+## Why: the measurements
+
+Full detail in `notes/E1-ROOFLINE-RESULTS.md` in the sibling working tree. Short version, all
+measured on an RTX 3090 against `qwen38-27b-exl3` at 4.000 bpw, mul1 codebook:
+
+- **Speculation saturates at a draft window of 15.** Per-row cost falls 13-14x from m=1 to m=16 and
+  then is completely flat out to m=144. Cause: the dense `TILESIZE_M=16` GEMM re-streams the whole
+  trellis once per 16-row row-tile. Wall time is exactly proportional to `ceil(m/16)`.
+- **A 2.41x fix exists and is prototyped.** Holding compute identical and varying only how often a
+  16x16 B tile is decoded: restream 9.216 ms vs shared 3.817 ms at NROW=4.
+- **Every cheap lever is exhausted.** No flag, kernel shape, grid size, reconstruct path, or config
+  variant beats the shipped default (best forced gain 1.044x). The cooperative grid is capped at
+  one block per SM — `num_sms` 164 is a fatal `too many blocks in cooperative launch` assert.
+- The trellis decode is not the wall: a standalone read+decode probe sustains 777 GB/s (87% of the
+  measured 893 GB/s streaming ceiling) and the achievable ceiling is at least 932 GB/s.
+- `exl3_gemm_kernel_inner` **already** implements `TILEBLOCKS_M > 1` with row fragments sharing one
+  dequantized B fragment. It is instantiated only for the fused-MoE path. The flagship change is
+  exposing that path for dense shapes, not writing a new kernel.
+
+## Building
+
+The extension is a single ~1.7 GB `.so` and a full build is slow. Practical notes:
+
+- CUDA and torch must agree. The working environment has system CUDA 13.0 and `torch 2.10.0+cu130`;
+  set `CUDAHOSTCXX` to a g++ wrapper if the host toolchain hits the glibc 2.43 `rsqrt` noexcept
+  conflict.
+- A wheel built against CUDA 12 needs `libcudart.so.12` on `LD_LIBRARY_PATH` at import time even
+  when torch is a cu13 build.
+
+## License
+
+MIT, inherited. `LICENSE` is unchanged and upstream copyright is retained.
